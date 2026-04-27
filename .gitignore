@@ -1,0 +1,57 @@
+# Python cache / build files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment / secrets
+.env
+*.env
+rf.env
+env.example
+
+# Encrypted session logs and keys
+session_logs.enc
+session_logs.key
+*.enc
+*.key
+
+# Local debug/output files
+debug/
+logs/
+*.log
+*.tmp
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local media/debug captures
+*.mp4
+*.avi
+*.mov
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.webp
