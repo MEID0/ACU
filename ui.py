@@ -566,6 +566,7 @@ class MedicalKiosk(ctk.CTk):
 
         headache_allergen = self._get_allergen_for_diagnosis("Headache")
         stomach_allergen = self._get_allergen_for_diagnosis("Stomach Upset")
+        burn_allergen = self._get_allergen_for_diagnosis("Burn")
 
         self._hud_button(
             cv,
@@ -586,6 +587,17 @@ class MedicalKiosk(ctk.CTk):
             124,
             "STOMACH UPSET",
             lambda: self.show_safety("Stomach Upset", stomach_allergen, 1.0),
+            font_size=30,
+        )
+
+        self._hud_button(
+            cv,
+            42,
+            466,
+            516,
+            124,
+            "BURN",
+            lambda: self.show_safety("Burn", burn_allergen, 1.0),
             font_size=30,
         )
 
