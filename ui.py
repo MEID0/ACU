@@ -838,7 +838,6 @@ class MedicalKiosk(ctk.CTk):
         self._spin_frame = 0
         self._spin_spinner(cv, self.X(self.config_obj.design_width // 2), self.Y(580), self.S(96))
         threading.Thread(target=self._do_dispense, daemon=True).start()
-        self.after(4200, self._end_dispense)
 
     def _spin_spinner(self, cv, cx, cy, radius):
         cv.delete("spinner")
@@ -874,6 +873,8 @@ class MedicalKiosk(ctk.CTk):
                 self.hardware.dispense_item()
         except Exception:
             pass
+        # Schedule _end_dispense on the main thread now that hardware is truly done.
+        self.after(0, self._end_dispense)
 
     def _end_dispense(self):
         if self._spin_job:
