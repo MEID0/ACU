@@ -177,6 +177,9 @@ class MedicalKiosk(ctk.CTk):
         self._hotspots = []
         self._termination_canvas = None
 
+        # Stock tracking — in-memory only, resets every program start.
+        self._stock: dict = dict(self._DEFAULT_STOCK)
+
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.root = tk.Frame(self, bg=BG)
         self.root.pack(fill="both", expand=True)
@@ -824,6 +827,83 @@ class MedicalKiosk(ctk.CTk):
 
         self.after(0, self.show_home)
 
+
+    # ── Stock helpers ──────────────────────────────────────────────────────────
+
+    # Shared pill tray (Headache + Stomach Upset): 14 total
+    # Burn gel: 15 total
+    # Laceration: no stock tracking (manual bandage / external supply)
+    _DEFAULT_STOCK = {
+        "pills": 14,   # shared by Headache and Stomach Upset
+        "Burn":  15,
+    }
+
+    # Map each diagnosis to its stock key (None = no stock)
+    _STOCK_KEY = {
+        "Headache":      "pills",
+        "Stomach Upset": "pills",
+        "Burn":          "Burn",
+        "Laceration":    None,
+    }
+
+    def _decrement_stock(self, diagnosis: str) -> None:
+        key = self._STOCK_KEY.get(diagnosis)
+        if key and key in self._stock:
+            self._stock[key] = max(0, self._stock[key] - 1)
+
+    def _draw_stock_card(self, cv, diagnosis: str, y: int = 430) -> None:
+        """Draw a compact remaining-stock indicator. No-op for diagnoses with no stock."""
+        key = self._STOCK_KEY.get(diagnosis)
+        if not key:
+            return
+        count = self._stock.get(key, 0)
+        if count > 5:
+            bar_color = "#049767"   # green
+            label_color = "#049767"
+        elif count > 2:
+            bar_color = "#C46A00"   # amber
+            label_color = "#C46A00"
+        else:
+            bar_color = "#C63838"   # red
+            label_color = "#C63838"
+
+        # Card background
+        bx, by, bw, bh = 42, y, 516, 100
+        cv.create_rectangle(
+            self.X(bx), self.Y(by),
+            self.X(bx + bw), self.Y(by + bh),
+            fill=WHITE, outline=bar_color, width=2
+        )
+
+        # Left colour strip
+        cv.create_rectangle(
+            self.X(bx), self.Y(by),
+            self.X(bx + 8), self.Y(by + bh),
+            fill=bar_color, outline=""
+        )
+
+        # Title
+        cx = self.X(bx + bw // 2)
+        cv.create_text(
+            cx, self.Y(by + 22),
+            text="REMAINING STOCK",
+            fill=MUTED, font=f_body(10, bold=True), anchor="center"
+        )
+
+        # Count
+        cv.create_text(
+            cx, self.Y(by + 56),
+            text=str(count),
+            fill=label_color, font=f_display(28), anchor="center"
+        )
+
+        # Treatment label
+        treatment = self.config_obj.diagnosis_treatment_map.get(diagnosis, diagnosis)
+        cv.create_text(
+            cx, self.Y(by + 82),
+            text=treatment,
+            fill=MUTED, font=f_body(10), anchor="center"
+        )
     def show_dispensing(self):
         cv = self._new_canvas()
         self._header(cv, "DISPENSING")
@@ -881,6 +961,7 @@ class MedicalKiosk(ctk.CTk):
             self.after_cancel(self._spin_job)
             self._spin_job = None
         self.audit.log("dispense_complete")
+        self._decrement_stock(getattr(self, "_pending_diagnosis", ""))
         self.show_discharged()
 
     def show_discharged(self):
@@ -892,6 +973,7 @@ class MedicalKiosk(ctk.CTk):
         cv.create_text(cx2 + 56, body_y, text="We wish you a speedy recovery.", fill=BODY_TEXT, font=f_body(11), anchor="w")
         self._footer(cv)
         self._finalize(cv)
+        self._draw_stock_card(cv, getattr(self, "_pending_diagnosis", ""), y=430)
         self._countdown = 5
         self._termination_canvas = cv
         self._draw_termination_card()
