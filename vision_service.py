@@ -216,6 +216,151 @@ class VisionService:
 
         return cap
 
+    def _usb_backend(self) -> int:
+        """Return the appropriate OpenCV backend for USB cameras on this OS."""
+        import sys as _sys
+        if _sys.platform == "win32":
+            return cv2.CAP_DSHOW
+        return cv2.CAP_V4L2
+
+    def _open_usb_camera(self) -> bool:
+        """Open a USB camera using its device index."""
+        index = self.config.camera_index
+        backend = self._usb_backend()
+
+        for attempt in range(self._open_retries()):
+            logging.info("Opening USB camera at index %d (attempt %d)...", index, attempt + 1)
+
+            cap = cv2.VideoCapture(index, backend)
+
+            # Allow a moment for the device to initialise
+            for _ in range(8):
+                if cap is not None and cap.isOpened():
+                    break
+                time.sleep(0.15)
+
+            if cap is None or not cap.isOpened():
+                if cap is not None:
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+                logging.warning("USB camera open attempt %d failed.", attempt + 1)
+                time.sleep(self._reopen_delay())
+                continue
+
+            # Configure resolution and FPS
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._camera_width())
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._camera_height())
+            cap.set(cv2.CAP_PROP_FPS, self._camera_fps())
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+
+            self.cap = cap
+            self._frame_counter = 0
+            self._camera_ready = True
+            self._last_read_error_logged = False
+            self._reader_failures = 0
+
+            with self._frame_lock:
+                self._latest_frame = None
+                self._latest_frame_ts = 0.0
+
+            self._reader_stop.clear()
+            self._reader_thread = threading.Thread(
+                target=self._reader_loop,
+                name="vision-camera-reader",
+                daemon=True,
+            )
+            self._reader_thread.start()
+
+            startup_wait = max(
+                float(getattr(self.config, "warmup_seconds", 1.5)),
+                self._startup_timeout(),
+            )
+
+            if self._wait_for_first_frame(startup_wait):
+                logging.info("USB camera at index %d opened successfully.", index)
+                return True
+
+            logging.warning(
+                "USB camera opened but no frames arrived on attempt %d.",
+                attempt + 1,
+            )
+            self.stop_camera()
+            time.sleep(self._reopen_delay())
+
+        logging.error("Could not open USB camera at index %d.", index)
+        return False
+
+    def _open_csi_camera(self) -> bool:
+        """Open a Jetson CSI camera using GStreamer pipelines."""
+        pipelines = self._gstreamer_pipelines()
+
+        for round_index in range(self._probe_rounds()):
+            if round_index > 0:
+                logging.warning("Retrying camera probe round %d...", round_index + 1)
+                time.sleep(self._round_delay())
+
+            for pipeline in pipelines:
+                logging.info("Opening Jetson CSI camera with pipeline: %s", pipeline)
+
+                for attempt in range(self._open_retries()):
+                    cap = self._open_capture(pipeline)
+
+                    if cap is not None and cap.isOpened():
+                        try:
+                            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        except Exception:
+                            pass
+
+                        self.cap = cap
+                        self._frame_counter = 0
+                        self._camera_ready = True
+                        self._last_read_error_logged = False
+                        self._reader_failures = 0
+
+                        with self._frame_lock:
+                            self._latest_frame = None
+                            self._latest_frame_ts = 0.0
+
+                        self._reader_stop.clear()
+                        self._reader_thread = threading.Thread(
+                            target=self._reader_loop,
+                            name="vision-camera-reader",
+                            daemon=True,
+                        )
+                        self._reader_thread.start()
+
+                        startup_wait = max(
+                            float(getattr(self.config, "warmup_seconds", 1.5)),
+                            self._startup_timeout(),
+                        )
+
+                        if self._wait_for_first_frame(startup_wait):
+                            logging.info("Jetson CSI camera opened successfully.")
+                            return True
+
+                        logging.warning(
+                            "Camera opened but no frames arrived on attempt %d.",
+                            attempt + 1,
+                        )
+                        self.stop_camera()
+                    else:
+                        if cap is not None:
+                            try:
+                                cap.release()
+                            except Exception:
+                                pass
+
+                    logging.warning("Camera open attempt %d failed.", attempt + 1)
+                    time.sleep(self._reopen_delay())
+
+        logging.error("Could not open Jetson CSI camera through OpenCV GStreamer.")
+        return False
+
     def start_camera(self) -> bool:
         if not CV2_AVAILABLE:
             logging.warning("OpenCV not found; camera is unavailable.")
@@ -242,69 +387,10 @@ class VisionService:
             else:
                 time.sleep(self._reopen_delay())
 
-            pipelines = self._gstreamer_pipelines()
-
-            for round_index in range(self._probe_rounds()):
-                if round_index > 0:
-                    logging.warning("Retrying camera probe round %d...", round_index + 1)
-                    time.sleep(self._round_delay())
-
-                for pipeline in pipelines:
-                    logging.info("Opening Jetson CSI camera with pipeline: %s", pipeline)
-
-                    for attempt in range(self._open_retries()):
-                        cap = self._open_capture(pipeline)
-
-                        if cap is not None and cap.isOpened():
-                            try:
-                                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                            except Exception:
-                                pass
-
-                            self.cap = cap
-                            self._frame_counter = 0
-                            self._camera_ready = True
-                            self._last_read_error_logged = False
-                            self._reader_failures = 0
-
-                            with self._frame_lock:
-                                self._latest_frame = None
-                                self._latest_frame_ts = 0.0
-
-                            self._reader_stop.clear()
-                            self._reader_thread = threading.Thread(
-                                target=self._reader_loop,
-                                name="vision-camera-reader",
-                                daemon=True,
-                            )
-                            self._reader_thread.start()
-
-                            startup_wait = max(
-                                float(getattr(self.config, "warmup_seconds", 1.5)),
-                                self._startup_timeout(),
-                            )
-
-                            if self._wait_for_first_frame(startup_wait):
-                                logging.info("Jetson CSI camera opened successfully.")
-                                return True
-
-                            logging.warning(
-                                "Camera opened but no frames arrived on attempt %d.",
-                                attempt + 1,
-                            )
-                            self.stop_camera()
-                        else:
-                            if cap is not None:
-                                try:
-                                    cap.release()
-                                except Exception:
-                                    pass
-
-                        logging.warning("Camera open attempt %d failed.", attempt + 1)
-                        time.sleep(self._reopen_delay())
-
-            logging.error("Could not open Jetson CSI camera through OpenCV GStreamer.")
-            return False
+            if self.config.use_jetson_csi:
+                return self._open_csi_camera()
+            else:
+                return self._open_usb_camera()
 
     def stop_camera(self) -> None:
         self._camera_ready = False
@@ -340,7 +426,7 @@ class VisionService:
         self.stop_camera()
 
     def _restart_camera(self) -> bool:
-        logging.warning("Restarting CSI camera...")
+        logging.warning("Restarting camera...")
         self.stop_camera()
         time.sleep(self._reopen_delay())
         return self.start_camera()

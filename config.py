@@ -84,11 +84,11 @@ class AppConfig:
     log_encryption_key_file: str = field(default_factory=lambda: _get_path("ACU_LOG_KEY_FILE", "session_logs.key"))
     session_log_csv: str = field(init=False)
 
-    use_jetson_csi: bool = field(default_factory=lambda: _get_bool("ACU_USE_JETSON_CSI", True))
+    use_jetson_csi: bool = field(default_factory=lambda: _get_bool("ACU_USE_JETSON_CSI", False))
     camera_index: int = field(default_factory=lambda: _get_int("ACU_CAMERA_INDEX", 0))
     camera_width: int = field(default_factory=lambda: _get_int("ACU_CAMERA_WIDTH", 1280))
     camera_height: int = field(default_factory=lambda: _get_int("ACU_CAMERA_HEIGHT", 720))
-    camera_fps: int = field(default_factory=lambda: _get_int("ACU_CAMERA_FPS", 15))
+    camera_fps: int = field(default_factory=lambda: _get_int("ACU_CAMERA_FPS", 30))
     camera_flip_method: int = field(default_factory=lambda: _get_int("ACU_CAMERA_FLIP_METHOD", 0))
     warmup_seconds: float = field(default_factory=lambda: _get_float("ACU_CAMERA_WARMUP_SECONDS", 1.5))
     flush_frames: int = field(default_factory=lambda: _get_int("ACU_CAMERA_FLUSH_FRAMES", 0))
