@@ -106,7 +106,11 @@ class AppConfig:
     camera_round_delay: float = field(default_factory=lambda: _get_float("ACU_CAMERA_ROUND_DELAY", 2.0))
     camera_initial_delay: float = field(default_factory=lambda: _get_float("ACU_CAMERA_INITIAL_DELAY", 1.0))
     camera_reader_failure_limit: int = field(default_factory=lambda: _get_int("ACU_CAMERA_READER_FAILURE_LIMIT", 20))
-    workflow_timeout_seconds: float = field(default_factory=lambda: _get_float("ACU_WORKFLOW_TIMEOUT_SECONDS", 3.0))
+    # Local AI / inference settings.
+    # roboflow_http means this app sends camera frames to the local Docker
+    # Roboflow/YOLO service, normally listening on http://127.0.0.1:9001.
+    inference_backend: str = field(default_factory=lambda: os.getenv("ACU_INFERENCE_BACKEND", "roboflow_http").strip().lower())
+    workflow_timeout_seconds: float = field(default_factory=lambda: _get_float("ACU_WORKFLOW_TIMEOUT_SECONDS", 10.0))
 
     roboflow_api_url: str = field(default_factory=lambda: os.getenv("ROBOFLOW_API_URL", "http://127.0.0.1:9001"))
     roboflow_api_key: str = field(default_factory=lambda: os.getenv("ROBOFLOW_API_KEY", "F2KG4LO7SndaWk2m3PnN"))
@@ -168,6 +172,7 @@ FRAME_WIDTH = CONFIG.camera_width
 FRAME_HEIGHT = CONFIG.camera_height
 PROCESS_EVERY_N_FRAMES = CONFIG.process_every_n_frames
 
+ACU_INFERENCE_BACKEND = CONFIG.inference_backend
 ROBOFLOW_API_URL = CONFIG.roboflow_api_url
 ROBOFLOW_API_KEY = CONFIG.roboflow_api_key
 WORKSPACE_NAME = CONFIG.roboflow_workspace

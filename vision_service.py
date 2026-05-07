@@ -483,48 +483,86 @@ class VisionService:
         return Image.fromarray(stretched)
 
     def _collect_predictions(self, result: Any) -> list[dict]:
+        """Collect prediction dictionaries from common Roboflow/YOLO JSON shapes.
+
+        Roboflow Workflows can return predictions at different nesting levels,
+        depending on the exact workflow blocks. This recursive collector supports:
+          - {"predictions": [{...}]}
+          - {"predictions": {"predictions": [{...}]}}
+          - {"outputs": [{"predictions": ...}]}
+          - generic YOLO-like {"detections": [{...}]} / {"objects": [{...}]}
+        """
         predictions: list[dict] = []
 
-        if isinstance(result, list):
-            for item in result:
-                predictions.extend(self._collect_predictions(item))
-            return predictions
+        def looks_like_prediction(item: dict) -> bool:
+            has_label = any(key in item for key in ("class", "class_name", "label", "name"))
+            has_conf = any(key in item for key in ("confidence", "conf", "score", "probability"))
+            return has_label and has_conf
 
-        if not isinstance(result, dict):
-            return predictions
+        def visit(obj: Any) -> None:
+            if isinstance(obj, list):
+                for item in obj:
+                    visit(item)
+                return
 
-        pred_block = result.get("predictions")
-        if isinstance(pred_block, dict):
-            nested = pred_block.get("predictions")
-            if isinstance(nested, list):
-                predictions.extend([p for p in nested if isinstance(p, dict)])
-        elif isinstance(pred_block, list):
-            predictions.extend([p for p in pred_block if isinstance(p, dict)])
+            if not isinstance(obj, dict):
+                return
 
-        outputs = result.get("outputs")
-        if isinstance(outputs, list):
-            for output in outputs:
-                predictions.extend(self._collect_predictions(output))
+            if looks_like_prediction(obj):
+                predictions.append(obj)
 
+            for key in ("predictions", "detections", "objects", "results", "outputs"):
+                value = obj.get(key)
+                if value is not None:
+                    visit(value)
+
+        visit(result)
         return predictions
 
     def _extract_count_objects(self, result: Any) -> int:
-        if not isinstance(result, dict):
-            return 0
-
-        outputs = result.get("outputs")
-        if not isinstance(outputs, list):
-            return 0
-
+        """Extract count_objects from nested workflow output, if present."""
         total = 0
-        for output in outputs:
-            if isinstance(output, dict):
-                count = output.get("count_objects", 0)
+
+        def visit(obj: Any) -> None:
+            nonlocal total
+            if isinstance(obj, list):
+                for item in obj:
+                    visit(item)
+                return
+
+            if not isinstance(obj, dict):
+                return
+
+            if "count_objects" in obj:
                 try:
-                    total += int(count)
+                    total += int(obj.get("count_objects", 0))
                 except Exception:
                     pass
+
+            for value in obj.values():
+                if isinstance(value, (dict, list)):
+                    visit(value)
+
+        visit(result)
         return total
+
+    def _prediction_confidence(self, prediction: dict) -> float:
+        for key in ("confidence", "conf", "score", "probability"):
+            value = prediction.get(key)
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except Exception:
+                continue
+        return 0.0
+
+    def _prediction_label(self, prediction: dict) -> str:
+        for key in ("class", "class_name", "label", "name"):
+            value = prediction.get(key)
+            if value is not None and str(value).strip():
+                return str(value)
+        return "Unknown"
 
     def normalize_label(self, raw_label: str) -> str:
         raw = raw_label.strip()
@@ -557,7 +595,7 @@ class VisionService:
     def _frame_to_jpeg_bytes(self, frame) -> bytes:
         ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
         if not ok:
-            raise RuntimeError("Could not JPEG-encode frame for HTTP inference.")
+            raise RuntimeError("Could not JPEG-encode frame for local AI inference.")
         return encoded.tobytes()
 
     def _workflow_url(self) -> str:
@@ -572,10 +610,9 @@ class VisionService:
         workflow = self.config.roboflow_workflow_id.strip()
         return f"{base}/{workspace}/workflows/{workflow}/describe_interface"
 
-    def _post_workflow_json(self, url: str, image_bytes: bytes) -> Optional[dict]:
+    def _workflow_payload(self, image_bytes: bytes) -> dict:
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-
-        payload = {
+        return {
             "api_key": self.config.roboflow_api_key,
             "inputs": {
                 "image": {
@@ -585,26 +622,32 @@ class VisionService:
             },
         }
 
-        timeout_seconds = float(getattr(self.config, "workflow_timeout_seconds", 3.0))
+    def _post_workflow_json(self, url: str, image_bytes: bytes) -> Optional[dict]:
+        payload = self._workflow_payload(image_bytes)
+        timeout_seconds = float(getattr(self.config, "workflow_timeout_seconds", 10.0))
 
         try:
             response = requests.post(url, json=payload, timeout=timeout_seconds)
         except Exception as exc:
-            logging.error("HTTP workflow JSON call failed for %s: %s", url, exc)
+            logging.error(
+                "Local AI HTTP call failed for %s. Is Docker container yolo26-jetson running? Error: %s",
+                url,
+                exc,
+            )
             return None
 
         if response.ok:
             try:
                 result = response.json()
-                logging.info("Workflow HTTP call succeeded on %s", url)
+                logging.info("Local AI workflow call succeeded on %s", url)
                 return result
             except Exception as exc:
-                logging.error("Workflow response was not valid JSON for %s: %s", url, exc)
+                logging.error("Local AI response was not valid JSON for %s: %s", url, exc)
                 return None
 
-        body_preview = response.text[:300] if response.text else ""
+        body_preview = response.text[:500] if response.text else ""
         logging.error(
-            "Workflow HTTP call failed on %s with status %s. Body: %s",
+            "Local AI workflow call failed on %s with status %s. Body: %s",
             url,
             response.status_code,
             body_preview,
@@ -612,20 +655,31 @@ class VisionService:
         return None
 
     def _describe_interface(self) -> None:
+        if not REQUESTS_AVAILABLE:
+            return
+
         url = self._workflow_describe_url()
         payload = {"api_key": self.config.roboflow_api_key}
         try:
             response = requests.post(url, json=payload, timeout=5)
             if response.ok:
-                logging.info("Workflow interface: %s", response.text[:500])
+                logging.info("Local AI workflow interface: %s", response.text[:500])
             else:
-                logging.info("Describe interface failed with status %s", response.status_code)
+                logging.info("Local AI describe_interface failed with status %s", response.status_code)
         except Exception as exc:
-            logging.info("Describe interface request failed: %s", exc)
+            logging.info("Local AI describe_interface request failed: %s", exc)
 
     def _run_http_workflow(self, frame) -> dict:
+        """Send one frame to the local Docker AI service.
+
+        The Docker service should be running before main.py starts, for example:
+            sudo docker start yolo26-jetson
+
+        Default endpoint:
+            http://127.0.0.1:9001/{workspace}/workflows/{workflow_id}
+        """
         if not REQUESTS_AVAILABLE:
-            raise RuntimeError("requests is not installed, so HTTP inference cannot run.")
+            raise RuntimeError("requests is not installed, so local HTTP inference cannot run.")
 
         image_bytes = self._frame_to_jpeg_bytes(frame)
         url = self._workflow_url()
@@ -636,34 +690,21 @@ class VisionService:
 
         self._describe_interface()
         raise RuntimeError(
-            f"Workflow endpoint failed at {url}. "
-            "Check request body keys against /docs or the workflow deploy snippet."
+            f"Local AI workflow endpoint failed at {url}. "
+            "Make sure the Docker container is running and publishing port 9001."
         )
 
-    def _run_local_workflow(self, frame) -> VisionDecision:
-        try:
-            result = self._run_http_workflow(frame)
-        except Exception as exc:
-            logging.error("HTTP workflow inference failed: %s", exc)
-            return VisionDecision(
-                diagnosis="Unknown",
-                confidence=0.0,
-                raw_label="Unknown",
-                allergen=self.get_allergen("Unknown"),
-                accepted=False,
-                reason="workflow_http_failed",
-            )
-
+    def _decision_from_workflow_result(self, result: Any) -> VisionDecision:
         predictions = self._collect_predictions(result)
         if predictions:
-            best = max(predictions, key=lambda p: float(p.get("confidence", 0.0)))
-            raw_label = str(best.get("class", "Unknown"))
-            confidence = float(best.get("confidence", 0.0))
+            best = max(predictions, key=self._prediction_confidence)
+            raw_label = self._prediction_label(best)
+            confidence = self._prediction_confidence(best)
             diagnosis = self.normalize_label(raw_label)
             accepted = self._passes_threshold(diagnosis, confidence)
 
             logging.info(
-                "Best prediction: raw_label=%s normalized=%s confidence=%.4f accepted=%s",
+                "Best local AI prediction: raw_label=%s normalized=%s confidence=%.4f accepted=%s",
                 raw_label,
                 diagnosis,
                 confidence,
@@ -680,7 +721,7 @@ class VisionService:
             )
 
         count_objects = self._extract_count_objects(result)
-        logging.info("Workflow returned no explicit predictions. count_objects=%s", count_objects)
+        logging.info("Local AI returned no explicit predictions. count_objects=%s", count_objects)
 
         return VisionDecision(
             diagnosis="Unknown",
@@ -690,6 +731,35 @@ class VisionService:
             accepted=False,
             reason="no_predictions" if count_objects == 0 else "count_without_labels",
         )
+
+    def _run_local_workflow(self, frame) -> VisionDecision:
+        backend = str(getattr(self.config, "inference_backend", "roboflow_http")).strip().lower()
+
+        if backend not in {"roboflow_http", "http", "docker", "local_docker", "roboflow"}:
+            logging.error("Unsupported ACU_INFERENCE_BACKEND=%s", backend)
+            return VisionDecision(
+                diagnosis="Unknown",
+                confidence=0.0,
+                raw_label="Unknown",
+                allergen=self.get_allergen("Unknown"),
+                accepted=False,
+                reason="unsupported_inference_backend",
+            )
+
+        try:
+            result = self._run_http_workflow(frame)
+        except Exception as exc:
+            logging.error("Local Docker AI inference failed: %s", exc)
+            return VisionDecision(
+                diagnosis="Unknown",
+                confidence=0.0,
+                raw_label="Unknown",
+                allergen=self.get_allergen("Unknown"),
+                accepted=False,
+                reason="local_ai_http_failed",
+            )
+
+        return self._decision_from_workflow_result(result)
 
     def _simulation_stub(self) -> VisionDecision:
         diagnosis = self.normalize_label(self.config.simulated_diagnosis)
