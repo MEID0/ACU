@@ -62,41 +62,52 @@ class ACUHardware:
             return False
         return self.trigger_dispenser()
 
-    def trigger_servo_for_pill(
+    # ── Servo helpers (dual-servo PCA9685 via Arduino) ───────────────────────
+    #
+    # The Arduino runs ServoPush.ino on a PCA9685 board:
+    #   Command '1' → servo on channel 0 (pills: Headache / Stomach Upset)
+    #   Command '2' → servo on channel 2 (gels:  Burn)
+    #
+    # Each sweep: 170 steps × 20 ms × 2 directions + 3 × 1 s delays ≈ 9.8 s
+    # We wait 11 s to be safe.
+
+    _SERVO_WAIT_SECONDS = 11
+
+    def trigger_servo(
         self,
-        port: str = "/dev/ttyTHS1",   # Jetson Nano hardware UART (TX→D0, RX→D1)
+        command: str = "1",
+        port: str = "/dev/ttyTHS1",   # Jetson Nano hardware UART
         baud: int = 9600,
     ) -> bool:
-        """Trigger the Arduino servo sweep exactly once.
+        """Send a single-character command ('1' or '2') to the Arduino to
+        trigger one full servo sweep (170→0→170 degrees).
 
-        The Arduino listens on Serial1 (hardware UART, pins D0/D1) at 9600 baud.
-        Sending 'S' starts the one-shot sweep (0→170→0 degrees).
-        After the sweep is done, 'R' is sent so the Arduino is ready for the
-        next patient without needing a physical reset.
-
-        Sweep timing:
-          - 170 steps forward  × 20 ms = 3.4 s
-          - 1 s delay in the middle
-          - 170 steps backward × 20 ms = 3.4 s
-          - Total ≈ 7.8 s  → we wait 9 s to be safe
+        Parameters
+        ----------
+        command : str
+            '1' – pill pusher  (PCA9685 channel 0)
+            '2' – gel pusher   (PCA9685 channel 2)
+        port : str
+            Serial port connected to the Arduino.
+        baud : int
+            Baud rate (must match the Arduino's Serial.begin).
         """
-        logging.info("Sending servo trigger 'S' to Arduino on %s @ %d baud.", port, baud)
+        logging.info(
+            "Sending servo command '%s' to Arduino on %s @ %d baud.",
+            command, port, baud,
+        )
         try:
             import serial  # pyserial
 
             with serial.Serial(port, baud, timeout=2) as ser:
-                # The Mega's Serial1 does not reset on a serial connection,
-                # so we can send immediately.
-                ser.write(b"S")
-                logging.info("Servo trigger 'S' sent. Waiting for sweep to complete...")
+                ser.write(command.encode())
+                logging.info(
+                    "Servo command '%s' sent. Waiting ≈%d s for sweep to complete...",
+                    command, self._SERVO_WAIT_SECONDS,
+                )
+                time.sleep(self._SERVO_WAIT_SECONDS)
 
-                # Wait for the full 0→170→0 sweep to finish before returning.
-                time.sleep(9)
-
-                # Reset the Arduino's hasRun flag so it is ready for the next patient.
-                ser.write(b"R")
-                logging.info("Reset command 'R' sent. Arduino ready for next use.")
-
+            logging.info("Servo sweep for command '%s' finished.", command)
             return True
 
         except ImportError:
@@ -105,6 +116,15 @@ class ACUHardware:
         except Exception as exc:
             logging.warning("Servo trigger failed: %s", exc)
             return False
+
+    # Convenience wrappers
+    def trigger_servo_for_pill(self, **kwargs) -> bool:
+        """Push pills (Headache / Stomach Upset) – servo channel 0."""
+        return self.trigger_servo(command="1", **kwargs)
+
+    def trigger_servo_for_gel(self, **kwargs) -> bool:
+        """Push gel (Burn) – servo channel 2."""
+        return self.trigger_servo(command="2", **kwargs)
 
     def cleanup(self) -> None:
         if self._ready and GPIO is not None:

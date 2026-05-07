@@ -945,10 +945,13 @@ class MedicalKiosk(ctk.CTk):
         diagnosis = getattr(self, "_pending_diagnosis", "")
         try:
             if diagnosis in ("Headache", "Stomach Upset"):
-                # Pill / tablet diagnoses: trigger the Arduino servo once via serial.
+                # Pill / tablet diagnoses: servo channel 0 (command '1').
                 self.hardware.trigger_servo_for_pill()
+            elif diagnosis == "Burn":
+                # Gel diagnoses: servo channel 2 (command '2').
+                self.hardware.trigger_servo_for_gel()
             else:
-                # Physical-treatment diagnoses (Laceration, Burn, …): use the
+                # Physical-treatment diagnoses (Laceration, …): use the
                 # thermal-sensor-gated solenoid dispenser as before.
                 self.hardware.dispense_item()
         except Exception:
